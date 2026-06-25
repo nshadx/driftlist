@@ -7,4 +7,9 @@
         <Nullable>enable</Nullable>
     </PropertyGroup>
 
+    <ItemGroup>
+      <PackageReference Include="NAudio" Version="2.3.0" />
+      <PackageReference Include="Spectre.Console" Version="0.57.1" />
+    </ItemGroup>
+
 </Project>

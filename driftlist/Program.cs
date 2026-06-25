@@ -1,99 +1,169 @@
-﻿using System.Diagnostics;
+﻿using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using NAudio.Wave;
+using Spectre.Console;
 
-double[] vecA = [1.0, 1.0]; // phonk, aggressive
-double[] vecB = [1.0, 0.6]; // phonk, dark
-double[] vecC = [0.2, 0.1]; // rap, calm
-double[] vecD = [0.2, 0.2]; // rap, sad
-double[] vecE = [0.2, 1.0]; // rap, aggressive
+Console.OutputEncoding = Encoding.UTF8;
 
-double[][] vec =
-[
-    vecA,
-    vecB,
-    vecC,
-    vecD,
-    vecE,
-];
+const double temp = 0.2;
+const double topP = 0.3;
 
-var prob = GetProb(vec);
+var json = File.ReadAllText(args[0]);
+var musicDir = args[1];
 
-Track a = new("phonk", "aggressive");
-Track b = new("phonk", "dark");
-Track c = new("rap", "calm");
-Track d = new("rap", "sad");
-Track e = new("rap", "aggressive");
-
-Track[] lib = [a, b, c, d, e];
-
-Console.WriteLine($"{a} -> {Transition(0)}");
-Console.WriteLine($"{a} -> {Transition(0)}");
-Console.WriteLine($"{a} -> {Transition(0)}");
-Console.WriteLine($"{a} -> {Transition(0)}");
-Console.WriteLine($"{a} -> {Transition(0)}");
-
-Console.WriteLine("---");
-
-Console.WriteLine($"{b} -> {Transition(1)}");
-Console.WriteLine($"{b} -> {Transition(1)}");
-Console.WriteLine($"{b} -> {Transition(1)}");
-Console.WriteLine($"{b} -> {Transition(1)}");
-Console.WriteLine($"{b} -> {Transition(1)}");
-
-Console.WriteLine("---");
-
-Console.WriteLine($"{e} -> {Transition(4)}");
-Console.WriteLine($"{e} -> {Transition(4)}");
-Console.WriteLine($"{e} -> {Transition(4)}");
-Console.WriteLine($"{e} -> {Transition(4)}");
-Console.WriteLine($"{e} -> {Transition(4)}");
-
-Track Transition(int id)
+var entries = JsonSerializer.Deserialize<List<EmbeddingEntry>>(json, new JsonSerializerOptions
 {
-    var j = prob[id];
-    var p = Random.Shared.NextDouble();
-    var c = 0d;
-    for (var i = 0; i < j.Length; i++)
+    PropertyNameCaseInsensitive = true
+}) ?? throw new InvalidOperationException("Cannot deserialize embeddings.json");
+
+var lib = entries.Select(e => new Track(e.File)).OrderBy(t => t.Name).ToArray();
+var vec = entries.OrderBy(e => e.File).Select(e => e.Embedding).ToArray();
+var prob = GetProb(vec);
+var played = new HashSet<int>();
+
+WaveOutEvent? output = null;
+AudioFileReader? reader = null;
+
+void Play(string filename)
+{
+    output?.Stop();
+    output?.Dispose();
+    reader?.Dispose();
+
+    var path = Path.Combine(musicDir, filename);
+    reader = new AudioFileReader(path);
+    output = new WaveOutEvent();
+    output.Init(reader);
+    output.Play();
+}
+
+while (true)
+{
+    var selected = AnsiConsole.Prompt(
+        new SelectionPrompt<Track>()
+            .Title("[green]Выбери стартовый трек:[/]")
+            .PageSize(15)
+            .UseConverter(t => t.Name)
+            .AddChoices(lib)
+    );
+
+    var currentIndex = Array.IndexOf(lib, selected);
+    AnsiConsole.MarkupLine($"\n[bold yellow]▶ {selected.Name}[/]");
+    Play(selected.Name);
+
+    while (true)
     {
-        c += j[i];
-        if (p < c)
+        AnsiConsole.Markup("[grey]Enter — следующий, Q — сменить стартовый, Esc — выход[/] ");
+        var key = Console.ReadKey(intercept: true);
+        Console.WriteLine();
+
+        if (key.Key == ConsoleKey.Escape)
         {
-            return lib[i];
+            output?.Stop();
+            output?.Dispose();
+            reader?.Dispose();
+            return;
+        }
+
+        if (key.Key == ConsoleKey.Q)
+        {
+            output?.Stop();
+            break;
+        }
+
+        if (key.Key == ConsoleKey.Enter)
+        {
+            var next = Transition(currentIndex);
+            if (next == null)
+            {
+                output?.Stop();
+                AnsiConsole.MarkupLine("\n[grey]Все треки прослушаны.[/]");
+                played.Clear();
+                break;
+            }
+            currentIndex = Array.IndexOf(lib, next);
+            AnsiConsole.MarkupLine($"[bold yellow]▶ {next.Name}[/]");
+            Play(next.Name);
         }
     }
 
-    throw new UnreachableException();
+    Console.WriteLine();
+}
+
+Track? Transition(int id)
+{
+    played.Add(id);
+    var row = (double[])prob[id].Clone();
+
+    for (var i = 0; i < row.Length; i++)
+    {
+        if (played.Contains(i))
+            row[i] = 0;
+    }
+    
+    var sort = row
+        .Select((x, i) => (i, x))
+        .OrderByDescending(x => x.x)
+        .ToArray();
+    var c = 0d;
+    
+    for (var i = 0; i < sort.Length; i++)
+    {
+        c += sort[i].x;
+        
+        if (c > topP)
+            for (var j = i; j < sort.Length; j++)
+                row[sort[j].i] = 0;
+    }
+    
+    NormalizeProb(row);
+    
+    // Step 1: fill an array with 8 random bytes
+    var bytes = RandomNumberGenerator.GetBytes(8); 
+    // Step 2: bit-shift 11 and 53 based on double's mantissa bits
+    var ul = BitConverter.ToUInt64(bytes, 0) / (1 << 11);
+    var p = ul / (double)(1UL << 53);
+
+    c = 0;
+    for (var i = 0; i < row.Length; i++)
+    {
+        c += row[i];
+        if (p < c)
+            return lib[i];
+    }
+    
+    return null;
 }
 
 double[][] GetProb(double[][] vec)
 {
     var prob = new double[vec.Length][];
-    
     for (var i = 0; i < prob.Length; i++)
     {
         prob[i] = new double[vec.Length];
-        
         for (var j = 0; j < prob[i].Length; j++)
-        {
             prob[i][j] = CosineSimilarity(vec[i], vec[j]);
-        }
     }
-    
     for (var i = 0; i < prob.Length; i++)
     {
+        for (var j = 0; j < prob[i].Length; j++)
+            prob[i][j] /= temp;
         prob[i] = SoftMax(prob[i]);
     }
-    
     for (var i = 0; i < prob.Length; i++)
     {
         prob[i][i] = 0;
-        var s = prob[i].Sum();
-        for (var j = 0; j < prob[i].Length; j++)
-        {
-            prob[i][j] /= s;
-        }
+        NormalizeProb(prob[i]);
     }
-    
     return prob;
+}
+
+void NormalizeProb(double[] arr)
+{
+    var s = arr.Sum();
+    for (var i = 0; i < arr.Length; i++)
+        arr[i] /= s;
 }
 
 double[] SoftMax(double[] arr)
@@ -104,13 +174,9 @@ double[] SoftMax(double[] arr)
 
 double CosineSimilarity(double[] a, double[] b)
 {
-    // |a| = |b|
     var scalar = 0d;
     for (var i = 0; i < a.Length; i++)
-    {
         scalar += a[i] * b[i];
-    }
-    
     return scalar / (GetLength(a) * GetLength(b));
 }
 
@@ -118,11 +184,14 @@ double GetLength(double[] vec)
 {
     var sum = 0d;
     for (var i = 0; i < vec.Length; i++)
-    {
         sum += Math.Pow(vec[i], 2);
-    }
-    
     return Math.Sqrt(sum);
 }
 
-internal record Track(string Genre, string Mood);
+internal record Track(string Name);
+
+internal class EmbeddingEntry
+{
+    public string File { get; set; } = "";
+    public double[] Embedding { get; set; } = [];
+}
