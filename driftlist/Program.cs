@@ -80,30 +80,30 @@ while (true)
     var currentIndex = Array.IndexOf(lib, selected);
 
     // Session start: reset mood vector to the selected track's embedding.
-    effective = vec[currentIndex];
+    effective = (double[])vec[currentIndex].Clone();
 
     AnsiConsole.MarkupLine($"\n[bold yellow]▶ {selected.Name}[/]");
     Play(selected.Name);
 
     while (true)
     {
-        AnsiConsole.Markup("[grey]Enter — next track, Q — change start, Esc — exit[/] ");
+        AnsiConsole.Markup("[grey]Enter — next, M — pick manually, S — back to menu, X — exit[/] ");
         var key = Console.ReadKey(intercept: true);
         Console.WriteLine();
 
-        if (key.Key == ConsoleKey.Escape)
+        if (key.Key == ConsoleKey.S)
+        {
+            mediaPlayer.Stop();
+            played.Clear();
+            break;
+        }
+
+        if (key.Key == ConsoleKey.X)
         {
             mediaPlayer.Stop();
             mediaPlayer.Dispose();
             libVLC.Dispose();
             return;
-        }
-
-        if (key.Key == ConsoleKey.Q)
-        {
-            mediaPlayer.Stop();
-            played.Clear();
-            break;
         }
 
         if (key.Key == ConsoleKey.Enter)
@@ -121,6 +121,22 @@ while (true)
 
             AnsiConsole.MarkupLine($"[bold yellow]▶ {next.Name}[/]");
             Play(next.Name);
+        }
+
+        if (key.Key == ConsoleKey.M)
+        {
+            var manual = AnsiConsole.Prompt(
+                new SelectionPrompt<Track>()
+                    .Title("[green]Select track:[/]")
+                    .PageSize(15)
+                    .UseConverter(t => t.Name)
+                    .AddChoices(lib)
+            );
+
+            currentIndex = Array.IndexOf(lib, manual);
+            played.Add(currentIndex);
+            AnsiConsole.MarkupLine($"[bold yellow]▶ {manual.Name}[/]");
+            Play(manual.Name);
         }
     }
 
