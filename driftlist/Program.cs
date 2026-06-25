@@ -6,6 +6,8 @@ using Spectre.Console;
 
 Console.OutputEncoding = Encoding.UTF8;
 
+// учитывать время провождения над треком
+
 /*
  * Temperature parameter.
  * Controls how strongly cosine similarity differences are amplified before softmax.
