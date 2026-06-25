@@ -1,7 +1,7 @@
 ﻿using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using NAudio.Wave;
+using LibVLCSharp.Shared;
 using Spectre.Console;
 
 Console.OutputEncoding = Encoding.UTF8;
@@ -22,20 +22,18 @@ var vec = entries.OrderBy(e => e.File).Select(e => e.Embedding).ToArray();
 var prob = GetProb(vec);
 var played = new HashSet<int>();
 
-WaveOutEvent? output = null;
-AudioFileReader? reader = null;
+var libVLC = new LibVLC();
+var mediaPlayer = new MediaPlayer(libVLC);
 
 void Play(string filename)
 {
-    output?.Stop();
-    output?.Dispose();
-    reader?.Dispose();
+    var nameWithoutExt = Path.GetFileNameWithoutExtension(filename);
+    var path = Directory.GetFiles(musicDir)
+        .First(f => Path.GetFileNameWithoutExtension(f) == nameWithoutExt);
 
-    var path = Path.Combine(musicDir, filename);
-    reader = new AudioFileReader(path);
-    output = new WaveOutEvent();
-    output.Init(reader);
-    output.Play();
+    var media = new Media(libVLC, path);
+    mediaPlayer.Media = media;
+    mediaPlayer.Play();
 }
 
 while (true)
@@ -60,15 +58,16 @@ while (true)
 
         if (key.Key == ConsoleKey.Escape)
         {
-            output?.Stop();
-            output?.Dispose();
-            reader?.Dispose();
+            mediaPlayer.Stop();
+            mediaPlayer.Dispose();
+            libVLC.Dispose();
             return;
         }
 
         if (key.Key == ConsoleKey.Q)
         {
-            output?.Stop();
+            mediaPlayer.Stop();
+            played.Clear();
             break;
         }
 
@@ -77,7 +76,7 @@ while (true)
             var next = Transition(currentIndex);
             if (next == null)
             {
-                output?.Stop();
+                mediaPlayer.Stop();
                 AnsiConsole.MarkupLine("\n[grey]Все треки прослушаны.[/]");
                 played.Clear();
                 break;
@@ -101,28 +100,26 @@ Track? Transition(int id)
         if (played.Contains(i))
             row[i] = 0;
     }
-    
+
     var sort = row
         .Select((x, i) => (i, x))
         .OrderByDescending(x => x.x)
         .ToArray();
     var c = 0d;
-    
+
     for (var i = 0; i < sort.Length; i++)
     {
         c += sort[i].x;
-        
+
         if (c > topP)
             for (var j = i; j < sort.Length; j++)
                 row[sort[j].i] = 0;
     }
-    
+
     NormalizeProb(row);
-    
-    // Step 1: fill an array with 8 random bytes
-    var bytes = RandomNumberGenerator.GetBytes(8); 
-    // Step 2: bit-shift 11 and 53 based on double's mantissa bits
-    var ul = BitConverter.ToUInt64(bytes, 0) / (1 << 11);
+
+    var bytes = RandomNumberGenerator.GetBytes(8);
+    var ul = BitConverter.ToUInt64(bytes, 0) >> 11;
     var p = ul / (double)(1UL << 53);
 
     c = 0;
@@ -132,7 +129,7 @@ Track? Transition(int id)
         if (p < c)
             return lib[i];
     }
-    
+
     return null;
 }
 
