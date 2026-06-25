@@ -1,10 +1,10 @@
-# run.ps1 — установка зависимостей, генерация эмбеддингов и запуск driftlist (Windows)
+# run.ps1 - install dependencies, generate embeddings, and run driftlist (Windows)
 #
-# Использование:
-#   .\run.ps1 [-MusicDir "C:\путь\к\музыке"] [-ForceEmbed]
+# Usage:
+#   .\run.ps1 [-MusicDir "C:\path\to\music"] [-ForceEmbed]
 #
-# Если -MusicDir не указан — используется .\music рядом со скриптом.
-# -ForceEmbed заставляет пересчитать embeddings.json, даже если он уже есть.
+# If -MusicDir is not given, .\music next to this script is used.
+# -ForceEmbed forces embeddings.json to be regenerated even if it exists.
 
 param(
     [string]$MusicDir = "",
@@ -29,7 +29,6 @@ if ([string]::IsNullOrWhiteSpace($MusicDir)) {
     $MusicDir = $DefaultMusicDir
 }
 
-# ---------- Проверка прав на установку через winget ----------
 function Test-Command($name) {
     return [bool](Get-Command $name -ErrorAction SilentlyContinue)
 }
@@ -37,14 +36,14 @@ function Test-Command($name) {
 # ---------- .NET SDK ----------
 if (Test-Command "dotnet") {
     $dotnetVer = (dotnet --version) 2>$null
-    Log "Найден dotnet: $dotnetVer"
+    Log "Found dotnet: $dotnetVer"
 } else {
-    Warn ".NET SDK не найден."
+    Warn ".NET SDK not found."
     if (Test-Command "winget") {
-        Log "Устанавливаю .NET 10 SDK через winget..."
+        Log "Installing .NET 10 SDK via winget..."
         winget install --id Microsoft.DotNet.SDK.10 -e --accept-package-agreements --accept-source-agreements
     } else {
-        Err "winget не найден. Установите .NET 10 SDK вручную: https://dotnet.microsoft.com/download"
+        Err "winget not found. Install .NET 10 SDK manually: https://dotnet.microsoft.com/download"
         exit 1
     }
 }
@@ -69,70 +68,67 @@ foreach ($candidate in @("python", "py")) {
 }
 
 if (-not $PythonBin) {
-    Warn "Python 3.10+ не найден."
+    Warn "Python 3.10+ not found."
     if (Test-Command "winget") {
-        Log "Устанавливаю Python через winget..."
+        Log "Installing Python via winget..."
         winget install --id Python.Python.3.12 -e --accept-package-agreements --accept-source-agreements
         $PythonBin = "python"
     } else {
-        Err "winget не найден. Установите Python 3.10+ вручную: https://www.python.org/downloads/"
+        Err "winget not found. Install Python 3.10+ manually: https://www.python.org/downloads/"
         exit 1
     }
 }
 
-Log "Использую интерпретатор: $PythonBin"
+Log "Using interpreter: $PythonBin"
 
-# ---------- ffmpeg (нужен pydub для чтения mp3) ----------
+# ---------- ffmpeg (required by pydub to decode mp3) ----------
 if (-not (Test-Command "ffmpeg")) {
-    Warn "ffmpeg не найден (нужен pydub для декодирования mp3)."
+    Warn "ffmpeg not found (required by pydub to decode mp3 files)."
     if (Test-Command "winget") {
-        Log "Устанавливаю ffmpeg через winget..."
+        Log "Installing ffmpeg via winget..."
         winget install --id Gyan.FFmpeg -e --accept-package-agreements --accept-source-agreements
-        Warn "Возможно потребуется перезапустить терминал, чтобы PATH обновился."
+        Warn "You may need to restart your terminal for PATH changes to take effect."
     } else {
-        Err "winget не найден. Установите ffmpeg вручную: https://ffmpeg.org/download.html"
+        Err "winget not found. Install ffmpeg manually: https://ffmpeg.org/download.html"
         exit 1
     }
 } else {
-    Log "ffmpeg найден."
+    Log "ffmpeg found."
 }
 
-# ---------- csproj: на Windows пакет VideoLAN.LibVLC.Windows уже стоит безусловно ----------
-# Проверим, не пропатчен ли он уже на условный — если да, оставляем (Condition для Windows
-# тоже будет true), если нет — ничего делать не нужно, всё работает как есть.
-Log "csproj использует VideoLAN.LibVLC.Windows — на Windows дополнительных правок не требуется."
+# ---------- csproj: on Windows, VideoLAN.LibVLC.Windows is already unconditional ----------
+Log "csproj uses VideoLAN.LibVLC.Windows - no changes needed on Windows."
 
-# ---------- Python venv и зависимости ----------
+# ---------- Python venv and dependencies ----------
 if (-not (Test-Path $VenvDir)) {
-    Log "Создаю виртуальное окружение Python в .venv..."
+    Log "Creating Python virtual environment in .venv..."
     & $PythonBin -m venv $VenvDir
 }
 
 $VenvPython = Join-Path $VenvDir "Scripts\python.exe"
-$VenvPip    = Join-Path $VenvDir "Scripts\pip.exe"
 
-Log "Устанавливаю Python-зависимости (torch, pydub, numpy, maest-infer)..."
-& $VenvPip install --upgrade pip --quiet
-& $VenvPip install torch numpy pydub maest-infer --quiet
+Log "Installing Python dependencies (torch, pydub, numpy, maest-infer)..."
+& $VenvPython -m pip install --upgrade pip --quiet
+& $VenvPython -m pip install torch numpy pydub maest-infer --quiet
 
-# ---------- Генерация эмбеддингов ----------
+# ---------- Generate embeddings ----------
 if (-not (Test-Path $MusicDir)) {
-    Err "Папка с музыкой не найдена: $MusicDir"
-    Err "Передайте путь явно: .\run.ps1 -MusicDir 'C:\путь\к\музыке'"
+    Err "Music folder not found: $MusicDir"
+    Err "Pass the path explicitly: .\run.ps1 -MusicDir C:\path\to\music"
     exit 1
 }
 
 if ((Test-Path $EmbeddingsFile) -and (-not $ForceEmbed)) {
-    Log "Найден существующий $EmbeddingsFile — пропускаю генерацию эмбеддингов."
-    Log "(чтобы пересчитать — запустите с флагом -ForceEmbed)"
+    Log "Found existing $EmbeddingsFile - skipping embedding generation."
+    Log "(use -ForceEmbed to regenerate)"
 } else {
-    Log "Генерирую эмбеддинги из $MusicDir ..."
+    Log "Generating embeddings from $MusicDir ..."
     & $VenvPython $EmbedPy $MusicDir $EmbeddingsFile
 }
 
-# ---------- Сборка и запуск .NET бинаря ----------
-Log "Собираю driftlist (dotnet build)..."
+# ---------- Build and run the .NET binary ----------
+Log "Building driftlist (dotnet build)..."
 dotnet build $Csproj -c Release
 
-Log "Запускаю driftlist..."
+Log "Running driftlist..."
 dotnet run --project $Csproj -c Release -- $EmbeddingsFile $MusicDir
