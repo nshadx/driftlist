@@ -214,6 +214,9 @@ int UpdateEffective(Track next, double listenedSeconds)
     }
     else
     {
+        // alpha(t) = alphaMax * (1 - e^(-t / tau))
+        // Saturation function: alpha grows from 0 toward alphaMax as listen time increases.
+        // At t = tau, alpha reaches ~63% of alphaMax. Approaches alphaMax asymptotically — never reaches it exactly.
         var alpha = alphaMax * (1.0 - Math.Exp(-listenedSeconds / tau));
         for (var j = 0; j < effective.Length; j++)
             effective[j] = alpha * vec[nextIndex][j] + (1 - alpha) * effective[j];
