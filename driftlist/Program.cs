@@ -22,12 +22,20 @@ const double temp = 0.1;
 const double topP = 0.2;
 
 /*
- * EMA alpha parameter.
+ * EMA alpha parameter (maximum).
  * Controls how much weight the next track's embedding has over the accumulated mood vector.
  * Higher alpha → mood shifts quickly toward the new track.
  * Lower alpha → history dominates, mood changes slowly.
  */
-const double alpha = 0.6;
+const double alphaMax = 0.8;
+
+/*
+ * EMA time constant (seconds).
+ * Controls how quickly a track reaches its full weight in the mood vector.
+ * After tau seconds, a track contributes ~63% of its maximum influence.
+ * Example: tau = 60 means 1 minute of listening ≈ full weight.
+ */
+const double tau = 10.0;
 
 /*
  * Mood reset threshold.
@@ -49,6 +57,7 @@ var lib = entries.Select(e => new Track(e.File)).OrderBy(t => t.Name).ToArray();
 var vec = entries.OrderBy(e => e.File).Select(e => e.Embedding).ToArray();
 var played = new HashSet<int>();
 double[] effective;
+DateTime trackStarted;
 
 var libVLC = new LibVLC();
 var mediaPlayer = new MediaPlayer(libVLC);
@@ -93,6 +102,7 @@ void StartSession(int index)
     played.Clear();
     ResetEffective(index);
     PlayTrack(index);
+    trackStarted = DateTime.UtcNow;
     AnsiConsole.MarkupLine($"\n[bold yellow]▶ {lib[index].Name}[/]");
 }
 
@@ -113,6 +123,7 @@ void Quit()
 
 int HandleNext(int currentIndex)
 {
+    var elapsed = (DateTime.UtcNow - trackStarted).TotalSeconds;
     var next = Transition(currentIndex);
 
     if (next == null)
@@ -135,7 +146,8 @@ int HandleNext(int currentIndex)
         }
     }
 
-    var nextIndex = UpdateEffective(next);
+    var nextIndex = UpdateEffective(next, elapsed);
+    trackStarted = DateTime.UtcNow;
     AnsiConsole.MarkupLine($"[bold yellow]▶ {next.Name}[/]");
     PlayTrack(nextIndex);
     return nextIndex;
@@ -143,6 +155,8 @@ int HandleNext(int currentIndex)
 
 int HandleManual()
 {
+    var elapsed = (DateTime.UtcNow - trackStarted).TotalSeconds;
+
     var manual = AnsiConsole.Prompt(
         new SelectionPrompt<Track>()
             .Title("[green]Select track:[/]")
@@ -153,7 +167,8 @@ int HandleManual()
 
     var index = Array.IndexOf(lib, manual);
     played.Add(index);
-    UpdateEffective(manual);
+    UpdateEffective(manual, elapsed);
+    trackStarted = DateTime.UtcNow;
     AnsiConsole.MarkupLine($"[bold yellow]▶ {manual.Name}[/]");
     PlayTrack(index);
     return index;
@@ -178,26 +193,32 @@ void ResetEffective(int index)
 }
 
 /*
- * Updates the effective mood vector using EMA (Exponential Moving Average).
+ * Updates the effective mood vector using time-weighted EMA.
  *
- * If the new track is too dissimilar from the current mood (sim < threshold),
- * the history is discarded and effective is reset to the new track's embedding.
+ * Alpha is computed dynamically based on how long the track was listened to:
+ *   alpha(t) = alphaMax * (1 - e^(-t / tau))
  *
- * Otherwise, the EMA formula is applied element-wise:
- *   effective[j] = alpha * next[j] + (1 - alpha) * effective[j]
+ * Short listen → low alpha → track barely influences the mood vector.
+ * Long listen  → alpha approaches alphaMax → full influence.
  *
- * Because the formula is recurrent, the influence of each past track
- * decays exponentially — older tracks contribute less and less over time.
+ * If the new track is too dissimilar (sim < threshold), mood is reset instead.
  */
-int UpdateEffective(Track next)
+int UpdateEffective(Track next, double listenedSeconds)
 {
     var nextIndex = Array.IndexOf(lib, next);
     var sim = CosineSimilarity(effective, vec[nextIndex]);
+
     if (sim < threshold)
+    {
         effective = (double[])vec[nextIndex].Clone();
+    }
     else
+    {
+        var alpha = alphaMax * (1.0 - Math.Exp(-listenedSeconds / tau));
         for (var j = 0; j < effective.Length; j++)
             effective[j] = alpha * vec[nextIndex][j] + (1 - alpha) * effective[j];
+    }
+
     return nextIndex;
 }
 
@@ -237,8 +258,7 @@ Track? Transition(int id)
                 row[sortedRow[j].i] = 0;
     }
 
-    if (row.Sum() == 0)
-        return null;
+    if (row.Sum() == 0) return null;
 
     NormalizeProb(row);
 
