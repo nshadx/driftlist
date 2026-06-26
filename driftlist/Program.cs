@@ -33,7 +33,6 @@ const double alphaMax = 0.3;
  * EMA time constant (seconds).
  * Controls how quickly a track reaches its full weight in the mood vector.
  * After tau seconds, a track contributes ~63% of its maximum influence.
- * Example: tau = 60 means 1 minute of listening ≈ full weight.
  */
 const double tau = 10.0;
 
@@ -47,6 +46,7 @@ const double threshold = 0.5;
 
 var json = File.ReadAllText(args[0]);
 var musicDir = args[1];
+var logFile = args.Length > 2 ? args[2] : "transitions.jsonl";
 
 var entries = JsonSerializer.Deserialize<List<EmbeddingEntry>>(json, new JsonSerializerOptions
 {
@@ -56,7 +56,7 @@ var entries = JsonSerializer.Deserialize<List<EmbeddingEntry>>(json, new JsonSer
 var lib = entries.Select(e => new Track(e.File)).OrderBy(t => t.Name).ToArray();
 var vec = entries.OrderBy(e => e.File).Select(e => e.Embedding).ToArray();
 var played = new HashSet<int>();
-double[] effective;
+double[] effective = null!;
 DateTime trackStarted;
 
 var libVLC = new LibVLC();
@@ -147,6 +147,7 @@ int HandleNext(int currentIndex)
     }
 
     var nextIndex = UpdateEffective(next, elapsed);
+    LogTransition(lib[currentIndex], next, elapsed, nextIndex, manual: false);
     trackStarted = DateTime.UtcNow;
     AnsiConsole.MarkupLine($"[bold yellow]▶ {next.Name}[/]");
     PlayTrack(nextIndex);
@@ -166,6 +167,8 @@ int HandleManual()
     );
 
     var index = Array.IndexOf(lib, manual);
+    // Log before updating effective so sim reflects current mood vs manual pick
+    LogTransition(lib[index], manual, elapsed, index, manual: true);
     played.Add(index);
     UpdateEffective(manual, elapsed);
     trackStarted = DateTime.UtcNow;
@@ -183,6 +186,38 @@ void PlayTrack(int index)
     var media = new Media(libVLC, path);
     mediaPlayer.Media = media;
     mediaPlayer.Play();
+}
+
+// ── Logging ───────────────────────────────────────────────────────────────────
+
+/*
+ * Appends a single transition record to the log file in JSONL format.
+ * Each line is a self-contained JSON object — easy to parse and stream.
+ *
+ * Fields:
+ *   from            — track that was playing
+ *   to              — track selected next
+ *   listened_sec    — how long the previous track was playing before switching
+ *   effective_sim   — cosine similarity between effective mood vector and the next track
+ *   manual          — whether the user picked the track manually
+ *   temp / topP     — parameters used at transition time
+ *   ts              — UTC timestamp
+ */
+void LogTransition(Track from, Track to, double listenedSec, int toIndex, bool manual)
+{
+    var sim = CosineSimilarity(effective, vec[toIndex]);
+    var record = new
+    {
+        from = from.Name,
+        to = to.Name,
+        listened_sec = Math.Round(listenedSec, 2),
+        effective_sim = Math.Round(sim, 4),
+        manual,
+        temp,
+        topP,
+        ts = DateTime.UtcNow
+    };
+    File.AppendAllText(logFile, JsonSerializer.Serialize(record) + "\n");
 }
 
 // ── Effective mood vector ─────────────────────────────────────────────────────
