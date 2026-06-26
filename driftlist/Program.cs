@@ -27,7 +27,7 @@ const double topP = 0.2;
  * Higher alpha → mood shifts quickly toward the new track.
  * Lower alpha → history dominates, mood changes slowly.
  */
-const double alphaMax = 0.8;
+const double alphaMax = 0.3;
 
 /*
  * EMA time constant (seconds).
