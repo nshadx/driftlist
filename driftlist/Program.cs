@@ -32,7 +32,7 @@ const double threshold = 0.5;
 var json = File.ReadAllText(args[0]);
 var musicDir = args[1];
 var logFile = args.Length > 2 ? args[2] : "transitions.jsonl";
-var ucbFile = "ucb.json";
+var ucbFile = Path.Combine(Path.GetDirectoryName(args[0])!, "ucb.json");
 
 var entries = JsonSerializer.Deserialize<List<EmbeddingEntry>>(json, new JsonSerializerOptions
 {
