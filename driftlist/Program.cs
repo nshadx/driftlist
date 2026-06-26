@@ -48,17 +48,120 @@ var entries = JsonSerializer.Deserialize<List<EmbeddingEntry>>(json, new JsonSer
 var lib = entries.Select(e => new Track(e.File)).OrderBy(t => t.Name).ToArray();
 var vec = entries.OrderBy(e => e.File).Select(e => e.Embedding).ToArray();
 var played = new HashSet<int>();
-
-// Accumulated mood vector. Encodes the weighted history of recently played tracks.
-// Reset to the selected track's embedding at the start of each session.
 double[] effective;
 
 var libVLC = new LibVLC();
 var mediaPlayer = new MediaPlayer(libVLC);
 
-void Play(string filename)
+// ── Entry point ───────────────────────────────────────────────────────────────
+
+while (true)
 {
-    var nameWithoutExt = Path.GetFileNameWithoutExtension(filename);
+    var currentIndex = SelectStartingTrack();
+    StartSession(currentIndex);
+
+    while (true)
+    {
+        AnsiConsole.Markup("[grey]Enter — next, M — pick manually, S — new session, X — exit[/] ");
+        var key = Console.ReadKey(intercept: true);
+        Console.WriteLine();
+
+        if (key.Key == ConsoleKey.X) { Quit(); return; }
+        if (key.Key == ConsoleKey.S) { EndSession(); break; }
+        if (key.Key == ConsoleKey.Enter) currentIndex = HandleNext(currentIndex);
+        if (key.Key == ConsoleKey.M) currentIndex = HandleManual();
+    }
+
+    Console.WriteLine();
+}
+
+// ── Session control ───────────────────────────────────────────────────────────
+
+int SelectStartingTrack()
+{
+    return Array.IndexOf(lib, AnsiConsole.Prompt(
+        new SelectionPrompt<Track>()
+            .Title("[green]Select starting track:[/]")
+            .PageSize(15)
+            .UseConverter(t => t.Name)
+            .AddChoices(lib)
+    ));
+}
+
+void StartSession(int index)
+{
+    played.Clear();
+    ResetEffective(index);
+    PlayTrack(index);
+    AnsiConsole.MarkupLine($"\n[bold yellow]▶ {lib[index].Name}[/]");
+}
+
+void EndSession()
+{
+    mediaPlayer.Stop();
+    played.Clear();
+}
+
+void Quit()
+{
+    mediaPlayer.Stop();
+    mediaPlayer.Dispose();
+    libVLC.Dispose();
+}
+
+// ── Playback handlers ─────────────────────────────────────────────────────────
+
+int HandleNext(int currentIndex)
+{
+    var next = Transition(currentIndex);
+
+    if (next == null)
+    {
+        if (played.Count == lib.Length)
+        {
+            AnsiConsole.MarkupLine("\n[grey]All tracks have been played.[/]");
+            played.Clear();
+            return currentIndex;
+        }
+
+        ResetEffective(currentIndex);
+        AnsiConsole.MarkupLine("\n[grey]Mood reset, retrying...[/]");
+        next = Transition(currentIndex);
+
+        if (next == null)
+        {
+            AnsiConsole.MarkupLine("\n[grey]No candidates found.[/]");
+            return currentIndex;
+        }
+    }
+
+    var nextIndex = UpdateEffective(next);
+    AnsiConsole.MarkupLine($"[bold yellow]▶ {next.Name}[/]");
+    PlayTrack(nextIndex);
+    return nextIndex;
+}
+
+int HandleManual()
+{
+    var manual = AnsiConsole.Prompt(
+        new SelectionPrompt<Track>()
+            .Title("[green]Select track:[/]")
+            .PageSize(15)
+            .UseConverter(t => t.Name)
+            .AddChoices(lib)
+    );
+
+    var index = Array.IndexOf(lib, manual);
+    played.Add(index);
+    UpdateEffective(manual);
+    AnsiConsole.MarkupLine($"[bold yellow]▶ {manual.Name}[/]");
+    PlayTrack(index);
+    return index;
+}
+
+void PlayTrack(int index)
+{
+    var nameWithoutExt = Path.GetFileNameWithoutExtension(lib[index].Name);
     var path = Directory.GetFiles(musicDir)
         .First(f => Path.GetFileNameWithoutExtension(f) == nameWithoutExt);
 
@@ -67,97 +170,7 @@ void Play(string filename)
     mediaPlayer.Play();
 }
 
-while (true)
-{
-    var selected = AnsiConsole.Prompt(
-        new SelectionPrompt<Track>()
-            .Title("[green]Select starting track:[/]")
-            .PageSize(15)
-            .UseConverter(t => t.Name)
-            .AddChoices(lib)
-    );
-
-    var currentIndex = Array.IndexOf(lib, selected);
-
-    // Session start: reset mood vector to the selected track's embedding.
-    ResetEffective(currentIndex);
-
-    AnsiConsole.MarkupLine($"\n[bold yellow]▶ {selected.Name}[/]");
-    Play(selected.Name);
-
-    while (true)
-    {
-        AnsiConsole.Markup("[grey]Enter — next, M — pick manually, S — back to menu, X — exit[/] ");
-        var key = Console.ReadKey(intercept: true);
-        Console.WriteLine();
-
-        if (key.Key == ConsoleKey.S)
-        {
-            mediaPlayer.Stop();
-            played.Clear();
-            break;
-        }
-
-        if (key.Key == ConsoleKey.X)
-        {
-            mediaPlayer.Stop();
-            mediaPlayer.Dispose();
-            libVLC.Dispose();
-            return;
-        }
-
-        if (key.Key == ConsoleKey.Enter)
-        {
-            var next = Transition(currentIndex);
-
-            if (next == null)
-            {
-                if (played.Count == lib.Length)
-                {
-                    AnsiConsole.MarkupLine("\n[grey]All tracks have been played.[/]");
-                    played.Clear();
-                    break;
-                }
-
-                ResetEffective(currentIndex);
-                AnsiConsole.MarkupLine("\n[grey]Mood reset, retrying...[/]");
-                next = Transition(currentIndex);
-
-                if (next == null)
-                {
-                    AnsiConsole.MarkupLine("\n[grey]No candidates found.[/]");
-                    continue;
-                }
-            }
-
-            currentIndex = UpdateEffective(next);
-
-            AnsiConsole.MarkupLine($"[bold yellow]▶ {next.Name}[/]");
-            Play(next.Name);
-        }
-
-        if (key.Key == ConsoleKey.M)
-        {
-            var manual = AnsiConsole.Prompt(
-                new SelectionPrompt<Track>()
-                    .Title("[green]Select track:[/]")
-                    .PageSize(15)
-                    .UseConverter(t => t.Name)
-                    .AddChoices(lib)
-            );
-
-            currentIndex = Array.IndexOf(lib, manual);
-            played.Add(currentIndex);
-
-            _ = UpdateEffective(lib[currentIndex]);
-
-            AnsiConsole.MarkupLine($"[bold yellow]▶ {manual.Name}[/]");
-            Play(manual.Name);
-        }
-    }
-
-    Console.WriteLine();
-}
+// ── Effective mood vector ─────────────────────────────────────────────────────
 
 void ResetEffective(int index)
 {
@@ -187,6 +200,8 @@ int UpdateEffective(Track next)
             effective[j] = alpha * vec[nextIndex][j] + (1 - alpha) * effective[j];
     return nextIndex;
 }
+
+// ── Markov transition ─────────────────────────────────────────────────────────
 
 /*
  * Samples the next track using the current effective mood vector.
@@ -222,8 +237,7 @@ Track? Transition(int id)
                 row[sortedRow[j].i] = 0;
     }
 
-    var sum = row.Sum();
-    if (sum == 0)
+    if (row.Sum() == 0)
         return null;
 
     NormalizeProb(row);
@@ -243,6 +257,8 @@ Track? Transition(int id)
 
     return null;
 }
+
+// ── Math ──────────────────────────────────────────────────────────────────────
 
 /*
  * Builds a single transition probability row from a source embedding.
@@ -269,7 +285,6 @@ double[] GetProbRow(double[] vec1, int excludeIndex = -1)
         row[excludeIndex] = 0;
 
     NormalizeProb(row);
-
     return row;
 }
 
@@ -328,6 +343,8 @@ double GetLength(double[] vec)
         sum += Math.Pow(vec[i], 2);
     return Math.Sqrt(sum);
 }
+
+// ── Types ─────────────────────────────────────────────────────────────────────
 
 internal record Track(string Name);
 
