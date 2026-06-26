@@ -42,12 +42,12 @@ var entries = JsonSerializer.Deserialize<List<EmbeddingEntry>>(json, new JsonSer
 var lib = entries.Select(e => new Track(e.File)).OrderBy(t => t.Name).ToArray();
 var vec = entries.OrderBy(e => e.File).Select(e => e.Embedding).ToArray();
 var played = new HashSet<int>();
-double[] effective = null!;
+double[] effective;
 DateTime trackStarted;
 
 // Active UCB parameters for the current session (set by SelectHandle before StartSession)
-double temp = 0.1;
-double topP = 0.2;
+double temp;
+double topP;
 
 var libVLC = new LibVLC();
 var mediaPlayer = new MediaPlayer(libVLC);
@@ -140,7 +140,8 @@ void FinalizeSession(Handle handle, List<double> rewards)
 Handle SelectHandle(UcbState state)
 {
     var unvisited = state.Handles.FirstOrDefault(h => h.TimesChosen == 0);
-    if (unvisited != null) return unvisited;
+    if (unvisited != null)
+        return unvisited;
     return state.Handles.MaxBy(x => x.MeanReward + Math.Sqrt(2 * Math.Log(state.TotalPulls) / x.TimesChosen))!;
 }
 
@@ -342,19 +343,25 @@ Track? Transition(int id)
 
     NormalizeProb(row);
 
-    var bytes = RandomNumberGenerator.GetBytes(8);
-    var ul = BitConverter.ToUInt64(bytes, 0) >> 11;
-    var p = ul / (double)(1UL << 53);
+    var prob = GetRandomDouble();
 
     cumulative = 0;
     for (var i = 0; i < row.Length; i++)
     {
         cumulative += row[i];
-        if (p < cumulative)
+        if (prob < cumulative)
             return lib[i];
     }
 
     return null;
+}
+
+double GetRandomDouble()
+{
+    var bytes = RandomNumberGenerator.GetBytes(8);
+    var ul = BitConverter.ToUInt64(bytes, 0) >> 11;
+    var d = ul / (double)(1UL << 53);
+    return d;
 }
 
 // ── Math ──────────────────────────────────────────────────────────────────────
