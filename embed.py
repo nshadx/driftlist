@@ -29,12 +29,16 @@ def parse_args() -> tuple[str, str]:
     return audio_dir, output_file
 
 
-def load_mp3(path: str, duration_sec: int = 40) -> torch.Tensor:
-    """Load an mp3 file as a mono 16kHz float tensor normalized to [-1, 1]."""
+def load_mp3(path: str) -> torch.Tensor:
+    """Load an mp3 file as a mono 16kHz float tensor normalized to [-1, 1].
+    Extracts 30 seconds from the middle of the track."""
     audio = AudioSegment.from_mp3(path)
     audio = audio.set_frame_rate(16000).set_channels(1)
-    # audio = audio[:1000 * 20]
-
+    
+    duration_ms = len(audio)
+    start_ms = max(0, (duration_ms - 30_000) // 2)
+    audio = audio[start_ms:start_ms + 30_000]
+    
     samples = np.array(audio.get_array_of_samples()).astype(np.float32)
     samples /= np.iinfo(audio.array_type).max
     return torch.tensor(samples)

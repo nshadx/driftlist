@@ -6,22 +6,20 @@ using Spectre.Console;
 
 Console.OutputEncoding = Encoding.UTF8;
 
-// учитывать время провождения над треком
-
 /*
  * Temperature parameter.
  * Controls how strongly cosine similarity differences are amplified before softmax.
  * Lower value → sharper distribution → more deterministic transitions.
  * Higher value → flatter distribution → more random transitions.
  */
-const double temp = 0.2;
+const double temp = 0.1;
 
 /*
  * Top-p threshold.
  * Filters out low-probability tracks before sampling.
  * Only tracks whose cumulative probability (sorted descending) fits within this threshold are considered.
  */
-const double topP = 0.3;
+const double topP = 0.2;
 
 /*
  * EMA alpha parameter.
@@ -29,7 +27,7 @@ const double topP = 0.3;
  * Higher alpha → mood shifts quickly toward the new track.
  * Lower alpha → history dominates, mood changes slowly.
  */
-const double alpha = 0.7;
+const double alpha = 0.6;
 
 /*
  * Mood reset threshold.
@@ -82,7 +80,7 @@ while (true)
     var currentIndex = Array.IndexOf(lib, selected);
 
     // Session start: reset mood vector to the selected track's embedding.
-    effective = (double[])vec[currentIndex].Clone();
+    ResetEffective(currentIndex);
 
     AnsiConsole.MarkupLine($"\n[bold yellow]▶ {selected.Name}[/]");
     Play(selected.Name);
@@ -111,12 +109,25 @@ while (true)
         if (key.Key == ConsoleKey.Enter)
         {
             var next = Transition(currentIndex);
+
             if (next == null)
             {
-                mediaPlayer.Stop();
-                AnsiConsole.MarkupLine("\n[grey]All tracks have been played.[/]");
-                played.Clear();
-                break;
+                if (played.Count == lib.Length)
+                {
+                    AnsiConsole.MarkupLine("\n[grey]All tracks have been played.[/]");
+                    played.Clear();
+                    break;
+                }
+
+                ResetEffective(currentIndex);
+                AnsiConsole.MarkupLine("\n[grey]Mood reset, retrying...[/]");
+                next = Transition(currentIndex);
+
+                if (next == null)
+                {
+                    AnsiConsole.MarkupLine("\n[grey]No candidates found.[/]");
+                    continue;
+                }
             }
 
             currentIndex = UpdateEffective(next);
@@ -137,12 +148,20 @@ while (true)
 
             currentIndex = Array.IndexOf(lib, manual);
             played.Add(currentIndex);
+
+            _ = UpdateEffective(lib[currentIndex]);
+
             AnsiConsole.MarkupLine($"[bold yellow]▶ {manual.Name}[/]");
             Play(manual.Name);
         }
     }
 
     Console.WriteLine();
+}
+
+void ResetEffective(int index)
+{
+    effective = (double[])vec[index].Clone();
 }
 
 /*
@@ -202,6 +221,10 @@ Track? Transition(int id)
             for (var j = i; j < sortedRow.Length; j++)
                 row[sortedRow[j].i] = 0;
     }
+
+    var sum = row.Sum();
+    if (sum == 0)
+        return null;
 
     NormalizeProb(row);
 
