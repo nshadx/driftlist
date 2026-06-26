@@ -7,21 +7,6 @@ using Spectre.Console;
 Console.OutputEncoding = Encoding.UTF8;
 
 /*
- * Temperature parameter.
- * Controls how strongly cosine similarity differences are amplified before softmax.
- * Lower value → sharper distribution → more deterministic transitions.
- * Higher value → flatter distribution → more random transitions.
- */
-const double temp = 0.1;
-
-/*
- * Top-p threshold.
- * Filters out low-probability tracks before sampling.
- * Only tracks whose cumulative probability (sorted descending) fits within this threshold are considered.
- */
-const double topP = 0.2;
-
-/*
  * EMA alpha parameter (maximum).
  * Controls how much weight the next track's embedding has over the accumulated mood vector.
  * Higher alpha → mood shifts quickly toward the new track.
@@ -47,6 +32,7 @@ const double threshold = 0.5;
 var json = File.ReadAllText(args[0]);
 var musicDir = args[1];
 var logFile = args.Length > 2 ? args[2] : "transitions.jsonl";
+var ucbFile = "ucb.json";
 
 var entries = JsonSerializer.Deserialize<List<EmbeddingEntry>>(json, new JsonSerializerOptions
 {
@@ -59,13 +45,26 @@ var played = new HashSet<int>();
 double[] effective = null!;
 DateTime trackStarted;
 
+// Active UCB parameters for the current session (set by SelectHandle before StartSession)
+double temp = 0.1;
+double topP = 0.2;
+
 var libVLC = new LibVLC();
 var mediaPlayer = new MediaPlayer(libVLC);
+
+// ── UCB init ──────────────────────────────────────────────────────────────────
+
+var ucb = LoadUcb();
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 while (true)
 {
+    var handle = SelectHandle(ucb);
+    temp = handle.PreferTemp;
+    topP = handle.PreferTopP;
+
+    var sessionRewards = new List<double>();
     var currentIndex = SelectStartingTrack();
     StartSession(currentIndex);
 
@@ -75,13 +74,91 @@ while (true)
         var key = Console.ReadKey(intercept: true);
         Console.WriteLine();
 
-        if (key.Key == ConsoleKey.X) { Quit(); return; }
-        if (key.Key == ConsoleKey.S) { EndSession(); break; }
-        if (key.Key == ConsoleKey.Enter) currentIndex = HandleNext(currentIndex);
+        if (key.Key == ConsoleKey.X)
+        {
+            FinalizeSession(handle, sessionRewards);
+            Quit();
+            return;
+        }
+
+        if (key.Key == ConsoleKey.S)
+        {
+            FinalizeSession(handle, sessionRewards);
+            EndSession();
+            break;
+        }
+
+        if (key.Key == ConsoleKey.Enter)
+        {
+            var (nextIndex, elapsed) = HandleNext(currentIndex);
+            if (elapsed > 0) sessionRewards.Add(elapsed);
+            currentIndex = nextIndex;
+        }
+
         if (key.Key == ConsoleKey.M) currentIndex = HandleManual();
     }
 
     Console.WriteLine();
+}
+
+// ── UCB ───────────────────────────────────────────────────────────────────────
+
+UcbState LoadUcb()
+{
+    if (File.Exists(ucbFile))
+    {
+        var loaded = JsonSerializer.Deserialize<UcbState>(File.ReadAllText(ucbFile),
+            new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+        if (loaded != null) return loaded;
+    }
+
+    double[] temps = [0.05, 0.1, 0.2];
+    double[] topPs = [0.3, 0.4, 0.5];
+    var arms = temps
+        .SelectMany(t => topPs.Select(p => new Handle(t, p, 0.0, 0)))
+        .ToArray();
+    return new UcbState(arms, 0);
+}
+
+void SaveUcb() =>
+    File.WriteAllText(ucbFile, JsonSerializer.Serialize(ucb, new JsonSerializerOptions { WriteIndented = true }));
+
+void FinalizeSession(Handle handle, List<double> rewards)
+{
+    if (rewards.Count == 0) return;
+    var reward = rewards.Average();
+    ucb = UpdateHandle(ucb, handle, reward);
+    SaveUcb();
+}
+
+/*
+ * Selects the arm with the highest UCB score:
+ *   score_j = MeanReward_j + sqrt(2 * ln(TotalPulls) / TimesChosen_j)
+ *
+ * If an arm has never been chosen (TimesChosen == 0), it gets infinite priority (initialization phase).
+ */
+Handle SelectHandle(UcbState state)
+{
+    var unvisited = state.Handles.FirstOrDefault(h => h.TimesChosen == 0);
+    if (unvisited != null) return unvisited;
+    return state.Handles.MaxBy(x => x.MeanReward + Math.Sqrt(2 * Math.Log(state.TotalPulls) / x.TimesChosen))!;
+}
+
+/*
+ * Updates the selected arm after a session ends.
+ * reward = mean listen time across all transitions in the session.
+ * MeanReward updated incrementally: x̄ = x̄ + (reward - x̄) / n_j
+ */
+UcbState UpdateHandle(UcbState state, Handle handle, double reward)
+{
+    state = state with { TotalPulls = state.TotalPulls + 1 };
+    var newN = handle.TimesChosen + 1;
+    state.Handles[Array.IndexOf(state.Handles, handle)] = handle with
+    {
+        MeanReward = handle.MeanReward + (reward - handle.MeanReward) / newN,
+        TimesChosen = newN
+    };
+    return state;
 }
 
 // ── Session control ───────────────────────────────────────────────────────────
@@ -90,7 +167,7 @@ int SelectStartingTrack()
 {
     return Array.IndexOf(lib, AnsiConsole.Prompt(
         new SelectionPrompt<Track>()
-            .Title("[green]Select starting track:[/]")
+            .Title($"[green]Select starting track:[/] [grey](temp={temp}, topP={topP})[/]")
             .PageSize(15)
             .UseConverter(t => t.Name)
             .AddChoices(lib)
@@ -121,7 +198,7 @@ void Quit()
 
 // ── Playback handlers ─────────────────────────────────────────────────────────
 
-int HandleNext(int currentIndex)
+(int nextIndex, double elapsed) HandleNext(int currentIndex)
 {
     var elapsed = (DateTime.UtcNow - trackStarted).TotalSeconds;
     var next = Transition(currentIndex);
@@ -132,7 +209,7 @@ int HandleNext(int currentIndex)
         {
             AnsiConsole.MarkupLine("\n[grey]All tracks have been played.[/]");
             played.Clear();
-            return currentIndex;
+            return (currentIndex, elapsed);
         }
 
         ResetEffective(currentIndex);
@@ -142,7 +219,7 @@ int HandleNext(int currentIndex)
         if (next == null)
         {
             AnsiConsole.MarkupLine("\n[grey]No candidates found.[/]");
-            return currentIndex;
+            return (currentIndex, 0);
         }
     }
 
@@ -151,7 +228,7 @@ int HandleNext(int currentIndex)
     trackStarted = DateTime.UtcNow;
     AnsiConsole.MarkupLine($"[bold yellow]▶ {next.Name}[/]");
     PlayTrack(nextIndex);
-    return nextIndex;
+    return (nextIndex, elapsed);
 }
 
 int HandleManual()
@@ -167,7 +244,6 @@ int HandleManual()
     );
 
     var index = Array.IndexOf(lib, manual);
-    // Log before updating effective so sim reflects current mood vs manual pick
     LogTransition(lib[index], manual, elapsed, index, manual: true);
     played.Add(index);
     UpdateEffective(manual, elapsed);
@@ -190,19 +266,6 @@ void PlayTrack(int index)
 
 // ── Logging ───────────────────────────────────────────────────────────────────
 
-/*
- * Appends a single transition record to the log file in JSONL format.
- * Each line is a self-contained JSON object — easy to parse and stream.
- *
- * Fields:
- *   from            — track that was playing
- *   to              — track selected next
- *   listened_sec    — how long the previous track was playing before switching
- *   effective_sim   — cosine similarity between effective mood vector and the next track
- *   manual          — whether the user picked the track manually
- *   temp / topP     — parameters used at transition time
- *   ts              — UTC timestamp
- */
 void LogTransition(Track from, Track to, double listenedSec, int toIndex, bool manual)
 {
     var sim = CosineSimilarity(effective, vec[toIndex]);
@@ -227,17 +290,6 @@ void ResetEffective(int index)
     effective = (double[])vec[index].Clone();
 }
 
-/*
- * Updates the effective mood vector using time-weighted EMA.
- *
- * Alpha is computed dynamically based on how long the track was listened to:
- *   alpha(t) = alphaMax * (1 - e^(-t / tau))
- *
- * Short listen → low alpha → track barely influences the mood vector.
- * Long listen  → alpha approaches alphaMax → full influence.
- *
- * If the new track is too dissimilar (sim < threshold), mood is reset instead.
- */
 int UpdateEffective(Track next, double listenedSeconds)
 {
     var nextIndex = Array.IndexOf(lib, next);
@@ -262,16 +314,6 @@ int UpdateEffective(Track next, double listenedSeconds)
 
 // ── Markov transition ─────────────────────────────────────────────────────────
 
-/*
- * Samples the next track using the current effective mood vector.
- *
- * Steps:
- *   1. Build a dynamic transition row from the effective vector via cosine similarity.
- *   2. Zero out already-played tracks (probability of revisiting = 0).
- *   3. Apply top-p filtering: keep only the most probable tracks up to the threshold.
- *   4. Renormalize so probabilities sum to 1.
- *   5. Sample using a cryptographically random number mapped to [0, 1).
- */
 Track? Transition(int id)
 {
     played.Add(id);
@@ -304,7 +346,6 @@ Track? Transition(int id)
     var ul = BitConverter.ToUInt64(bytes, 0) >> 11;
     var p = ul / (double)(1UL << 53);
 
-    // Segment sampling: partition [0, 1] by probability weights and find where p lands.
     cumulative = 0;
     for (var i = 0; i < row.Length; i++)
     {
@@ -318,17 +359,6 @@ Track? Transition(int id)
 
 // ── Math ──────────────────────────────────────────────────────────────────────
 
-/*
- * Builds a single transition probability row from a source embedding.
- *
- *   1. Compute cosine similarity between the source vector and every track in the library.
- *   2. Divide by temperature before softmax — since softmax grows exponentially,
- *      even small changes in input produce large differences in output probabilities.
- *      Lower temp → sharper contrast between similar and dissimilar tracks.
- *   3. Apply softmax to convert scores into a valid probability distribution.
- *   4. Zero out the current track (a track cannot transition to itself).
- *   5. Renormalize.
- */
 double[] GetProbRow(double[] vec1, int excludeIndex = -1)
 {
     var row = new double[vec.Length];
@@ -346,11 +376,6 @@ double[] GetProbRow(double[] vec1, int excludeIndex = -1)
     return row;
 }
 
-/*
- * Normalizes an array so that its elements sum to 1.
- * Divides each element by the total sum.
- * Note: minor floating-point drift in the sum is acceptable.
- */
 void NormalizeProb(double[] arr)
 {
     var s = arr.Sum();
@@ -358,30 +383,12 @@ void NormalizeProb(double[] arr)
         arr[i] /= s;
 }
 
-/*
- * Softmax function. Converts raw scores into a probability distribution.
- * Uses the exponential function — growth is nonlinear, which amplifies
- * differences between high and low scores.
- */
 double[] SoftMax(double[] arr)
 {
     var s = arr.Sum(Math.Exp);
     return arr.Select(x => Math.Exp(x) / s).ToArray();
 }
 
-/*
- * Cosine similarity between two vectors.
- * Measures the cosine of the angle between them in n-dimensional space.
- * Result ranges from -1 (opposite directions) to 1 (identical direction).
- *
- * When two vectors are collinear (point in the same direction),
- * the angle between them is 0° and cos(0°) = 1.
- * When perpendicular — 90°, cos(90°) = 0.
- * When opposite — 180°, cos(180°) = -1.
- *
- * Tracks with similar audio characteristics will have embeddings
- * that point in similar directions, yielding a similarity score close to 1.
- */
 double CosineSimilarity(double[] a, double[] b)
 {
     var scalar = 0d;
@@ -390,15 +397,11 @@ double CosineSimilarity(double[] a, double[] b)
     return scalar / (GetLength(a) * GetLength(b));
 }
 
-/*
- * Euclidean length (L2 norm) of a vector in n-dimensional space.
- * Used as the denominator in cosine similarity to normalize direction.
- */
-double GetLength(double[] vec)
+double GetLength(double[] v)
 {
     var sum = 0d;
-    for (var i = 0; i < vec.Length; i++)
-        sum += Math.Pow(vec[i], 2);
+    for (var i = 0; i < v.Length; i++)
+        sum += Math.Pow(v[i], 2);
     return Math.Sqrt(sum);
 }
 
@@ -411,3 +414,6 @@ internal class EmbeddingEntry
     public string File { get; set; } = "";
     public double[] Embedding { get; set; } = [];
 }
+
+internal record Handle(double PreferTemp, double PreferTopP, double MeanReward, int TimesChosen);
+internal record UcbState(Handle[] Handles, int TotalPulls);
